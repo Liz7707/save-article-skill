@@ -84,14 +84,22 @@ DOMAIN_CLEANUP = {
         'text_substitutions': [
             # 开头混入的登录提示 "登录后...查看全部 X 个回答"
             (r'登录后你可以不限量看优质回答.*?查看全部\s*[\d,]+\s*个回答', ''),
-            # 结尾广告卡片（从"升级泽锐"到"查看详情"之间的所有内容）
+            # 结尾广告卡片（通用：品牌名 + 的广告）
             (r'升级泽锐防蓝光后实际佩戴感受如何？[\s\S]*?查看详情', ''),
             (r'查看详情', ''),
             (r'以前戴蔡司佳锐[\s\S]*?体验提升明显', ''),
+            (r'深夜打游戏没人陪\？TT语音[\s\S]*?轻松开黑[！!]', ''),
+            (r'半夜睡不着想开黑\？TT语音[\s\S]*?轻松开黑[！!]', ''),
+            (r'TT语音的广告', ''),
             (r'蔡司的广告', ''),
             # 结尾 UI 文本
             (r'升级泽锐防蓝光后实际佩戴感受如何？', ''),
             (r'下载知乎客户端与世界分享知识、经验和见解', ''),
+            # 回答底部 UI（礼物提示、发布时间、AI 追问）
+            (r'还没有人送礼物[，,]\s*鼓励一下作者吧', ''),
+            (r'发布于\s*\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}[・·][^\n]*', ''),
+            (r'编辑于\s*\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}[・·][^\n]*', ''),
+            (r'继续追问[\s\S]*?由知乎直答提供[\s\S]*$', ''),
             # 结尾的查看全部 + 作者信息（最后一个段落）
             (r'查看全部\s*[\d,]+\s*个回答.*$', ''),
             # 热点推荐
@@ -149,6 +157,39 @@ def _match_domain(domain):
         if domain == key or domain.endswith('.' + key):
             return key
     return None
+
+
+def _extract_zhihu_answer_id(url):
+    """从知乎 URL 中提取 answer ID"""
+    # /question/<qid>/answer/<aid>  或  /answer/<aid>
+    m = re.search(r'/answer/(\d+)', url)
+    return m.group(1) if m else None
+
+
+def _find_target_element(soup, url):
+    """根据 URL 精确定位目标内容元素，避免提取页面其他无关内容。
+    返回 (element, domain) 或 (None, None) 表示未找到特定元素，需回退通用提取。"""
+    domain = urlparse(url).netloc
+
+    # 知乎回答：优先取 .RichContent--unescapable（纯正文，无其他回答混入）
+    aid = _extract_zhihu_answer_id(url)
+    if aid:
+        # 1. 最精准：纯回答正文（不含作者信息、不含"更多回答"）
+        for sel in [
+            '.RichContent--unescapable',
+            '.RichContent',
+        ]:
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) > 200:
+                return el, domain
+
+        # 2. 次选：第一个回答卡片（含作者信息，但只含一个回答）
+        for sel in ['.ContentItem.AnswerItem', '.AnswerItem']:
+            el = soup.select_one(sel)
+            if el and len(el.get_text(strip=True)) > 200:
+                return el, domain
+
+    return None, None
 
 
 def cleanup_html(soup, domain):
@@ -298,7 +339,10 @@ def cleanup_text(text, domain):
     soup = cleanup_html(soup, domain)
 
     # --- 找正文区域 ---
-    article = soup.find('article')
+    # 先尝试按 URL 精确定位目标元素（如知乎具体回答）
+    article, _ = _find_target_element(soup, url)
+    if not article:
+        article = soup.find('article')
     if not article:
         article = soup.find(role='main')
     if not article:
@@ -483,7 +527,10 @@ def fetch_url_browser(url):
     soup = cleanup_html(soup, domain)
 
     # --- 找正文区域 ---
-    article = soup.find('article')
+    # 先尝试按 URL 精确定位目标元素（如知乎具体回答）
+    article, _ = _find_target_element(soup, url)
+    if not article:
+        article = soup.find('article')
     if not article:
         article = soup.find(role='main')
     if not article:

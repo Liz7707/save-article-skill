@@ -1,0 +1,13 @@
+# 本地配置不提交
+.claude/
+# 保存的文章内容
+202*/
+# 临时文件
+*.tmp*
+/tmp/
+# Python
+__pycache__/
+*.pyc
+# 系统文件
+.DS_Store
+Thumbs.db

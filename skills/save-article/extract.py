@@ -100,8 +100,9 @@ DOMAIN_CLEANUP = {
             (r'发布于\s*\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}[・·][^\n]*', ''),
             (r'编辑于\s*\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}[・·][^\n]*', ''),
             (r'继续追问[\s\S]*?由知乎直答提供[\s\S]*$', ''),
-            # 结尾的查看全部 + 作者信息（最后一个段落）
-            (r'查看全部\s*[\d,]+\s*个回答.*$', ''),
+            # 结尾的"查看全部 X 个回答"（不跟 .*$ 避免误删正文）
+            (r'查看全部\s*[\d,]+\s*个回答\s*', ''),
+            (r'\n\d+\s*个回答\s*$', ''),
             # 热点推荐
             (r'2025你不可错过的热榜时刻', ''),
             (r'话题收录', ''),
@@ -171,23 +172,17 @@ def _find_target_element(soup, url):
     返回 (element, domain) 或 (None, None) 表示未找到特定元素，需回退通用提取。"""
     domain = urlparse(url).netloc
 
-    # 知乎回答：优先取 .RichContent--unescapable（纯正文，无其他回答混入）
+    # 知乎回答：优先取 soup 级别第一个 .RichContent（对应第一个回答）
     aid = _extract_zhihu_answer_id(url)
     if aid:
-        # 1. 最精准：纯回答正文（不含作者信息、不含"更多回答"）
-        for sel in [
-            '.RichContent--unescapable',
-            '.RichContent',
-        ]:
-            el = soup.select_one(sel)
-            if el and len(el.get_text(strip=True)) > 200:
-                return el, domain
-
-        # 2. 次选：第一个回答卡片（含作者信息，但只含一个回答）
-        for sel in ['.ContentItem.AnswerItem', '.AnswerItem']:
-            el = soup.select_one(sel)
-            if el and len(el.get_text(strip=True)) > 200:
-                return el, domain
+        # CSS 选择器直接取第一个匹配的 RichContent
+        rich = soup.select_one('.RichContent')
+        if rich and len(rich.get_text(strip=True)) > 200:
+            return rich, domain
+        # 备用：第一个回答卡片
+        card = soup.select_one('.ContentItem.AnswerItem, .AnswerItem')
+        if card and len(card.get_text(strip=True)) > 200:
+            return card, domain
 
     return None, None
 
@@ -328,11 +323,15 @@ def cleanup_text(text, domain):
     for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'form', 'noscript',
                      'iframe', 'svg', 'header', 'button', 'input', 'textarea']):
         tag.decompose()
-    for cls in ('sidebar', 'ad', 'advertisement', 'comments', 'comment', 'social',
-                'share', 'newsletter', 'related', 'recommend', 'hot', 'popup', 'modal',
+    for cls in ('sidebar', 'advertisement', 'comments', 'comment', 'social',
+                'share', 'newsletter', 'related', 'recommend', 'popup', 'modal',
                 'nav', 'footer', 'header', 'breadcrumb', 'toolbar', 'menu', 'widget'):
-        for el in soup.find_all(class_=re.compile(cls, re.I)):
+        for el in soup.find_all(class_=re.compile(r'\b' + cls + r'\b', re.I)):
             el.decompose()
+    for el in soup.find_all(class_=re.compile(r'(?:^|\s)ad(?:\s|$)', re.I)):
+        el.decompose()
+    for el in soup.find_all(class_=re.compile(r'(?:^|\s)hot(?:\s|$)', re.I)):
+        el.decompose()
 
     # 领域特定 HTML 清理
     domain = urlparse(url).netloc
@@ -361,7 +360,10 @@ def cleanup_text(text, domain):
     body_md = convert_html_to_md(article, base_url, uri)
     body_md = re.sub(r'\n{3,}', '\n\n', body_md)
     # 文本级噪音清理
+    body_md_before = body_md
     body_md = cleanup_text(body_md, domain)
+    if len(body_md) < 50 and len(body_md_before) > 50:
+        body_md = body_md_before
 
     word_count = len(re.sub(r'\s+', '', body_md))
 
@@ -517,10 +519,15 @@ def fetch_url_browser(url):
     for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'form', 'noscript',
                      'iframe', 'svg', 'header', 'button', 'input', 'textarea']):
         tag.decompose()
-    for c in ('sidebar', 'ad', 'advertisement', 'comments', 'comment', 'social',
-              'share', 'newsletter', 'related', 'recommend', 'hot', 'popup', 'modal'):
-        for el in soup.find_all(class_=re.compile(c, re.I)):
+    for c in ('sidebar', 'advertisement', 'comments', 'comment', 'social',
+              'share', 'newsletter', 'related', 'recommend', 'popup', 'modal'):
+        for el in soup.find_all(class_=re.compile(r'\b' + c + r'\b', re.I)):
             el.decompose()
+    # 'ad' 和 'hot' 单独处理——太短容易误匹配（如 RichContent--hasHotComment）
+    for el in soup.find_all(class_=re.compile(r'(?:^|\s)ad(?:\s|$)', re.I)):
+        el.decompose()
+    for el in soup.find_all(class_=re.compile(r'(?:^|\s)hot(?:\s|$)', re.I)):
+        el.decompose()
 
     # 领域特定 HTML 清理
     domain = urlparse(url).netloc
@@ -542,14 +549,16 @@ def fetch_url_browser(url):
                 break
     if not article:
         article = soup.body or soup
-
     uri = urlparse(url)
     base_url = f'{uri.scheme}://{uri.netloc}'
 
     body_md = convert_html_to_md(article, base_url, uri)
     body_md = re.sub(r'\n{3,}', '\n\n', body_md)
     # 文本级噪音清理
+    body_md_before = body_md
     body_md = cleanup_text(body_md, domain)
+    if len(body_md) < 50 and len(body_md_before) > 50:
+        body_md = body_md_before  # 清理过度时回退
     word_count = len(re.sub(r'\s+', '', body_md))
 
     return {

@@ -175,9 +175,9 @@ def _find_target_element(soup, url):
     # 知乎回答：优先取 soup 级别第一个 .RichContent（对应第一个回答）
     aid = _extract_zhihu_answer_id(url)
     if aid:
-        # CSS 选择器直接取第一个匹配的 RichContent
+        # CSS 选择器直接取第一个匹配的 RichContent（图文回答可能正文很短）
         rich = soup.select_one('.RichContent')
-        if rich and len(rich.get_text(strip=True)) > 200:
+        if rich and (len(rich.get_text(strip=True)) > 50 or rich.find('img')):
             return rich, domain
         # 备用：第一个回答卡片
         card = soup.select_one('.ContentItem.AnswerItem, .AnswerItem')
@@ -453,8 +453,6 @@ def fetch_url_browser(url, img_dir=None):
             context.close()
             raise RuntimeError('zhihu_login_required')
 
-        context.close()
-
         soup = BeautifulSoup(html, 'lxml')
 
         # --- 提取标题 ---
@@ -563,14 +561,14 @@ def fetch_url_browser(url, img_dir=None):
                 for old_url, local_path in img_map.items():
                     body_md = body_md.replace(old_url, local_path)
 
-    # 文本级噪音清理
+        # 文本级噪音清理
         body_md_before = body_md
         body_md = cleanup_text(body_md, domain)
         if len(body_md) < 50 and len(body_md_before) > 50:
-            body_md = body_md_before  # 清理过度时回退
+            body_md = body_md_before
         word_count = len(re.sub(r'\s+', '', body_md))
 
-        return {
+    return {
             'title': title,
             'author': author or None,
             'date': date_str or None,
@@ -619,13 +617,13 @@ def download_images(page, img_urls, img_dir):
             name = hashlib.md5(url.encode()).hexdigest()[:12] + ext
             path = os.path.join(img_dir, name)
             if os.path.exists(path):
-                mapping[url] = os.path.join('images', name)
+                mapping[url] = 'images/' + name
                 continue
-            resp = page.goto(url, timeout=15000)
+            resp = page.request.get(url, timeout=15000)
             if resp and resp.ok:
                 with open(path, 'wb') as f:
                     f.write(resp.body())
-                mapping[url] = os.path.join('images', name)
+                mapping[url] = 'images/' + name
         except Exception:
             continue
     return mapping
@@ -681,7 +679,8 @@ def convert_html_to_md(element, base_url, uri):
                             src = f'{uri.scheme}:' + src
                         elif src.startswith('/'):
                             src = base_url + src
-                        parts.append(f'![{alt}]({src})')
+                        if not src.startswith('data:'):
+                            parts.append(f'![{alt}]({src})')
                 elif c.name is None:
                     t = str(c).strip()
                     if t and t not in parts:
@@ -711,11 +710,32 @@ def convert_html_to_md(element, base_url, uri):
             lines.append(f'```{lang}\n{code_text.strip()}\n```')
         elif tag == 'hr':
             lines.append('---')
-        elif tag in ('figure', 'figcaption'):
+        elif tag in ('figure',):
+            # figure 中处理 img + figcaption
+            for img in child.find_all('img'):
+                alt = img.get('alt', '')
+                src = img.get('src', '') or img.get('data-src', '') or img.get('data-original', '')
+                if src:
+                    if src.startswith('//'):
+                        src = f'{uri.scheme}:' + src
+                    elif src.startswith('/'):
+                        src = base_url + src
+                    if not src.startswith('data:'):
+                        lines.append(f'![{alt}]({src})')
+            caption = child.find('figcaption')
+            if caption:
+                t = caption.get_text(strip=True)
+                if t: lines.append(f'*{t}*')
+        elif tag in ('figcaption',):
             t = child.get_text(strip=True)
-            if t: lines.append(t)
+            if t: lines.append(f'*{t}*')
         elif tag in ('table',):
             lines.append(child.get_text(strip=True))
+        elif tag in ('div', 'span'):
+            # 容器：递归处理子元素
+            sub = convert_html_to_md(child, base_url, uri)
+            if sub.strip():
+                lines.append(sub)
         else:
             t = child.get_text(strip=True)
             if t and len(t) > 20:

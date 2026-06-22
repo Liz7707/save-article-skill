@@ -431,8 +431,9 @@ def browser_login(url=None):
         print('登录状态已保存。', file=sys.stderr)
 
 
-def fetch_url_browser(url):
-    """用本地 Chrome 持久化配置抓取页面（headless，复用已保存的 cookie）"""
+def fetch_url_browser(url, img_dir=None):
+    """用本地 Chrome 持久化配置抓取页面（headless，复用已保存的 cookie）。
+    若提供 img_dir，将下载页面中的图片到此目录并替换 Markdown 路径。"""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -447,7 +448,6 @@ def fetch_url_browser(url):
 
         # 检测是否被拦截或需要登录
         if '您当前请求存在异常' in html:
-            context.close()
             raise RuntimeError('zhihu_blocked')
         if '/signin' in final_url and 'zhihu.com' in final_url:
             context.close()
@@ -455,122 +455,180 @@ def fetch_url_browser(url):
 
         context.close()
 
-    soup = BeautifulSoup(html, 'lxml')
+        soup = BeautifulSoup(html, 'lxml')
 
-    # --- 提取标题 ---
-    title = ''
-    for meta in soup.find_all('meta'):
-        prop = (meta.get('property') or '').lower()
-        name = (meta.get('name') or '').lower()
-        if prop in ('og:title', 'twitter:title') or name in ('og:title', 'twitter:title'):
-            t = meta.get('content', '').strip()
-            if t:
-                title = t
-                break
-    if not title and soup.title:
-        title = soup.title.get_text(strip=True)
-    if not title:
-        h1 = soup.find('h1')
-        if h1:
-            title = h1.get_text(strip=True)
-    if not title:
-        title = '未命名文章'
-    title = re.sub(r'\s*[|\-–—»]\s*[^|\-–—»]*$', '', title).strip()
-    title = re.sub(r'\s+', ' ', title)
+        # --- 提取标题 ---
+        title = ''
+        for meta in soup.find_all('meta'):
+            prop = (meta.get('property') or '').lower()
+            name = (meta.get('name') or '').lower()
+            if prop in ('og:title', 'twitter:title') or name in ('og:title', 'twitter:title'):
+                t = meta.get('content', '').strip()
+                if t:
+                    title = t
+                    break
+        if not title and soup.title:
+            title = soup.title.get_text(strip=True)
+        if not title:
+            h1 = soup.find('h1')
+            if h1:
+                title = h1.get_text(strip=True)
+        if not title:
+            title = '未命名文章'
+        title = re.sub(r'\s*[|\-–—»]\s*[^|\-–—»]*$', '', title).strip()
+        title = re.sub(r'\s+', ' ', title)
 
-    # --- 提取作者 ---
-    author = ''
-    for meta in soup.find_all('meta'):
-        mn = (meta.get('name') or '').lower()
-        mp = (meta.get('property') or '').lower()
-        if mn in ('author', 'article:author') or mp == 'article:author':
-            a = meta.get('content', '').strip()
-            if a:
-                author = a
-                break
-    if not author:
-        for cls in ('author', 'byline', 'writer', 'contributor'):
-            el = soup.find(class_=re.compile(cls, re.I))
-            if el:
-                author = el.get_text(strip=True)
-                break
-
-    # --- 提取发布日期 ---
-    date_str = ''
-    for meta in soup.find_all('meta'):
-        mp = (meta.get('property') or '').lower()
-        mn = (meta.get('name') or '').lower()
-        if mp == 'article:published_time' or mn in ('publication_date', 'date', 'publishdate', 'weibo:article:create_at'):
-            d = meta.get('content', '').strip()
-            if d:
-                date_str = d[:10]
-                break
-    if not date_str:
-        for cls in ('date', 'time', 'publish-time', 'post-date'):
-            el = soup.find(class_=re.compile(cls, re.I))
-            if el:
-                t = el.get('datetime') or el.get_text(strip=True)
-                m = re.search(r'(\d{4}-\d{2}-\d{2})', t)
-                if m:
-                    date_str = m.group(1)
+        # --- 提取作者 ---
+        author = ''
+        for meta in soup.find_all('meta'):
+            mn = (meta.get('name') or '').lower()
+            mp = (meta.get('property') or '').lower()
+            if mn in ('author', 'article:author') or mp == 'article:author':
+                a = meta.get('content', '').strip()
+                if a:
+                    author = a
+                    break
+        if not author:
+            for cls in ('author', 'byline', 'writer', 'contributor'):
+                el = soup.find(class_=re.compile(cls, re.I))
+                if el:
+                    author = el.get_text(strip=True)
                     break
 
-    # --- 移除噪音标签 ---
-    for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'form', 'noscript',
-                     'iframe', 'svg', 'header', 'button', 'input', 'textarea']):
-        tag.decompose()
-    for c in ('sidebar', 'advertisement', 'comments', 'comment', 'social',
-              'share', 'newsletter', 'related', 'recommend', 'popup', 'modal'):
-        for el in soup.find_all(class_=re.compile(r'\b' + c + r'\b', re.I)):
+        # --- 提取发布日期 ---
+        date_str = ''
+        for meta in soup.find_all('meta'):
+            mp = (meta.get('property') or '').lower()
+            mn = (meta.get('name') or '').lower()
+            if mp == 'article:published_time' or mn in ('publication_date', 'date', 'publishdate', 'weibo:article:create_at'):
+                d = meta.get('content', '').strip()
+                if d:
+                    date_str = d[:10]
+                    break
+        if not date_str:
+            for cls in ('date', 'time', 'publish-time', 'post-date'):
+                el = soup.find(class_=re.compile(cls, re.I))
+                if el:
+                    t = el.get('datetime') or el.get_text(strip=True)
+                    m = re.search(r'(\d{4}-\d{2}-\d{2})', t)
+                    if m:
+                        date_str = m.group(1)
+                        break
+
+        # --- 移除噪音标签 ---
+        for tag in soup(['script', 'style', 'nav', 'footer', 'aside', 'form', 'noscript',
+                         'iframe', 'svg', 'header', 'button', 'input', 'textarea']):
+            tag.decompose()
+        for c in ('sidebar', 'advertisement', 'comments', 'comment', 'social',
+                  'share', 'newsletter', 'related', 'recommend', 'popup', 'modal'):
+            for el in soup.find_all(class_=re.compile(r'\b' + c + r'\b', re.I)):
+                el.decompose()
+        # 'ad' 和 'hot' 单独处理——太短容易误匹配（如 RichContent--hasHotComment）
+        for el in soup.find_all(class_=re.compile(r'(?:^|\s)ad(?:\s|$)', re.I)):
             el.decompose()
-    # 'ad' 和 'hot' 单独处理——太短容易误匹配（如 RichContent--hasHotComment）
-    for el in soup.find_all(class_=re.compile(r'(?:^|\s)ad(?:\s|$)', re.I)):
-        el.decompose()
-    for el in soup.find_all(class_=re.compile(r'(?:^|\s)hot(?:\s|$)', re.I)):
-        el.decompose()
+        for el in soup.find_all(class_=re.compile(r'(?:^|\s)hot(?:\s|$)', re.I)):
+            el.decompose()
 
-    # 领域特定 HTML 清理
-    domain = urlparse(url).netloc
-    soup = cleanup_html(soup, domain)
+        # 领域特定 HTML 清理
+        domain = urlparse(url).netloc
+        soup = cleanup_html(soup, domain)
 
-    # --- 找正文区域 ---
-    # 先尝试按 URL 精确定位目标元素（如知乎具体回答）
-    article, _ = _find_target_element(soup, url)
-    if not article:
-        article = soup.find('article')
-    if not article:
-        article = soup.find(role='main')
-    if not article:
-        for sel in ('main', '.content', '.post', '.article', '.entry',
-                    '#content', '#article', '#post', '.post-content', '.article-content',
-                    '.RichContent', '.AnswerCard', '.QuestionAnswer-content'):
-            article = soup.select_one(sel)
-            if article:
-                break
-    if not article:
-        article = soup.body or soup
-    uri = urlparse(url)
-    base_url = f'{uri.scheme}://{uri.netloc}'
+        # --- 找正文区域 ---
+        # 先尝试按 URL 精确定位目标元素（如知乎具体回答）
+        article, _ = _find_target_element(soup, url)
+        if not article:
+            article = soup.find('article')
+        if not article:
+            article = soup.find(role='main')
+        if not article:
+            for sel in ('main', '.content', '.post', '.article', '.entry',
+                        '#content', '#article', '#post', '.post-content', '.article-content',
+                        '.RichContent', '.AnswerCard', '.QuestionAnswer-content'):
+                article = soup.select_one(sel)
+                if article:
+                    break
+        if not article:
+            article = soup.body or soup
+        uri = urlparse(url)
+        base_url = f'{uri.scheme}://{uri.netloc}'
 
-    body_md = convert_html_to_md(article, base_url, uri)
-    body_md = re.sub(r'\n{3,}', '\n\n', body_md)
+        body_md = convert_html_to_md(article, base_url, uri)
+        body_md = re.sub(r'\n{3,}', '\n\n', body_md)
+
+        # --- 下载图片 ---
+        if img_dir:
+            img_urls = collect_image_urls(article, base_url, uri)
+            if img_urls:
+                img_map = download_images(page, img_urls, img_dir)
+                for old_url, local_path in img_map.items():
+                    body_md = body_md.replace(old_url, local_path)
+
     # 文本级噪音清理
-    body_md_before = body_md
-    body_md = cleanup_text(body_md, domain)
-    if len(body_md) < 50 and len(body_md_before) > 50:
-        body_md = body_md_before  # 清理过度时回退
-    word_count = len(re.sub(r'\s+', '', body_md))
+        body_md_before = body_md
+        body_md = cleanup_text(body_md, domain)
+        if len(body_md) < 50 and len(body_md_before) > 50:
+            body_md = body_md_before  # 清理过度时回退
+        word_count = len(re.sub(r'\s+', '', body_md))
 
-    return {
-        'title': title,
-        'author': author or None,
-        'date': date_str or None,
-        'body': body_md,
-        'word_count': word_count,
-        'domain': urlparse(url).netloc,
-        'final_url': final_url,
-    }
+        return {
+            'title': title,
+            'author': author or None,
+            'date': date_str or None,
+            'body': body_md,
+            'word_count': word_count,
+            'domain': urlparse(url).netloc,
+            'final_url': final_url,
+        }
 
+
+
+def collect_image_urls(element, base_url, uri):
+    """从 HTML 元素中收集所有 img 的完整 URL（去重）"""
+    urls = []
+    seen = set()
+    for img in element.find_all('img'):
+        src = img.get('src', '') or img.get('data-src', '') or img.get('data-original', '')
+        if not src:
+            continue
+        if src.startswith('//'):
+            src = f'{uri.scheme}:' + src
+        elif src.startswith('/'):
+            src = base_url + src
+        if not src.startswith('http'):
+            continue
+        if src not in seen:
+            seen.add(src)
+            urls.append(src)
+    return urls
+
+
+def download_images(page, img_urls, img_dir):
+    """用 Playwright page（复用登录态 cookie）下载图片。
+    返回 {old_url: relative_path} 映射。"""
+    import hashlib
+    mapping = {}
+    if not img_urls:
+        return mapping
+    os.makedirs(img_dir, exist_ok=True)
+
+    for url in img_urls:
+        try:
+            ext = os.path.splitext(urlparse(url).path)[1].split('?')[0].split('#')[0]
+            if not ext or len(ext) > 6:
+                ext = '.jpg'
+            name = hashlib.md5(url.encode()).hexdigest()[:12] + ext
+            path = os.path.join(img_dir, name)
+            if os.path.exists(path):
+                mapping[url] = os.path.join('images', name)
+                continue
+            resp = page.goto(url, timeout=15000)
+            if resp and resp.ok:
+                with open(path, 'wb') as f:
+                    f.write(resp.body())
+                mapping[url] = os.path.join('images', name)
+        except Exception:
+            continue
+    return mapping
 
 def convert_html_to_md(element, base_url, uri):
     lines = []
@@ -699,7 +757,9 @@ def do_url(save_dir, url):
 def do_url_browser(save_dir, url):
     """使用本地 Chrome 浏览器抓取，适用于强反爬网站"""
     try:
-        data = fetch_url_browser(url)
+        now = datetime.now()
+        img_dir = os.path.join(save_dir, now.strftime("%Y"), now.strftime("%m"), "images")
+        data = fetch_url_browser(url, img_dir=img_dir)
     except RuntimeError as e:
         if str(e) == 'zhihu_login_required':
             print(json.dumps({

@@ -37,7 +37,7 @@ python3 "${SKILL_DIR}/extract.py" "${SAVE_DIR}" "<URL>"
 python3 "${SKILL_DIR}/extract.py" "${SAVE_DIR}" --browser "<URL>"
 ```
 
-headless 运行，无弹窗。cookie 自动保存在 `~/.claude/playwright-profile/`，跨会话复用。
+headless 运行，无弹窗。cookie 自动保存在 `~/.claude/playwright-profile/`，跨会话复用。回答中的图片自动下载到 `YYYY/MM/images/` 目录，Markdown 路径自动替换为本地相对路径。
 
 若 stdout 返回 `"error": "login_required"`，执行首次登录：
 

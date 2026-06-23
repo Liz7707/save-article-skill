@@ -557,7 +557,10 @@ def fetch_url_browser(url, img_dir=None):
         if img_dir:
             img_urls = collect_image_urls(article, base_url, uri)
             if img_urls:
-                img_map = download_images(page, img_urls, img_dir)
+                art_slug = slugify(title)
+                art_img_dir = os.path.join(img_dir, art_slug)
+                rel_prefix = 'images/' + art_slug
+                img_map = download_images(page, img_urls, art_img_dir, rel_prefix)
                 for old_url, local_path in img_map.items():
                     body_md = body_md.replace(old_url, local_path)
 
@@ -607,43 +610,52 @@ def collect_image_urls(element, base_url, uri):
     return urls
 
 
-def download_images(page, img_urls, img_dir):
-    """用 Playwright page（复用登录态 cookie）下载图片。
+def download_images(page, img_urls, img_dir, rel_prefix='images'):
+    """用 Playwright page（复用登录态 cookie）下载图片到 img_dir。
+    图片按文章内顺序命名为 1.jpg, 2.jpg, 3.gif...
+    rel_prefix 为 Markdown 中引用图片的相对路径前缀（如 images/文章slug）。
     返回 {old_url: relative_path} 映射。"""
-    import hashlib
     mapping = {}
     if not img_urls:
         return mapping
     os.makedirs(img_dir, exist_ok=True)
 
-    for url in img_urls:
+    for i, url in enumerate(img_urls, 1):
         try:
             ext = os.path.splitext(urlparse(url).path)[1].split('?')[0].split('#')[0]
             if not ext or len(ext) > 6:
                 ext = '.jpg'
-            name = hashlib.md5(url.encode()).hexdigest()[:12] + ext
+            name = f'{i}{ext}'
             path = os.path.join(img_dir, name)
+            rel_path = f'{rel_prefix}/{name}'
+
             if os.path.exists(path):
-                mapping[url] = 'images/' + name
+                mapping[url] = rel_path
+                _add_gif_alt_url(mapping, url, rel_path)
                 continue
+
             resp = page.request.get(url, timeout=15000)
             if resp and resp.ok:
                 with open(path, 'wb') as f:
                     f.write(resp.body())
-                mapping[url] = 'images/' + name
-                # 同时注册 .jpg ↔ .gif 互换 URL（知乎 GIF 封面用 jpg，实为 gif）
-                path_part = url.split('?')[0]
-                query_part = '?' + url.split('?', 1)[1] if '?' in url else ''
-                alt_url = None
-                if path_part.endswith('.gif'):
-                    alt_url = path_part[:-4] + '.jpg' + query_part
-                elif path_part.endswith('.jpg'):
-                    alt_url = path_part[:-4] + '.gif' + query_part
-                if alt_url:
-                    mapping[alt_url] = 'images/' + name
+                mapping[url] = rel_path
+                _add_gif_alt_url(mapping, url, rel_path)
         except Exception:
             continue
     return mapping
+
+
+def _add_gif_alt_url(mapping, url, rel_path):
+    """为 GIF/JPG 互换注册替代 URL（知乎 GIF 封面用 jpg）"""
+    path_part = url.split('?')[0]
+    query_part = '?' + url.split('?', 1)[1] if '?' in url else ''
+    alt_url = None
+    if path_part.endswith('.gif'):
+        alt_url = path_part[:-4] + '.jpg' + query_part
+    elif path_part.endswith('.jpg'):
+        alt_url = path_part[:-4] + '.gif' + query_part
+    if alt_url:
+        mapping[alt_url] = rel_path
 
 def convert_html_to_md(element, base_url, uri):
     lines = []

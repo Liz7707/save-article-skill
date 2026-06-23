@@ -585,7 +585,14 @@ def collect_image_urls(element, base_url, uri):
     urls = []
     seen = set()
     for img in element.find_all('img'):
-        src = img.get('src', '') or img.get('data-src', '') or img.get('data-original', '')
+        src = img.get('data-original', '') or img.get('data-src', '') or img.get('src', '')
+        # GIF 封面：src 为 jpg，替换为 gif（先去掉查询参数再判断）
+        cls = img.get('class', [])
+        if isinstance(cls, str):
+            cls = [cls]
+        path_part = src.split('?')[0]
+        if 'ztext-gif' in cls and path_part.endswith('.jpg'):
+            src = path_part[:-4] + '.gif' + ('?' + src.split('?', 1)[1] if '?' in src else '')
         if not src:
             continue
         if src.startswith('//'):
@@ -624,6 +631,16 @@ def download_images(page, img_urls, img_dir):
                 with open(path, 'wb') as f:
                     f.write(resp.body())
                 mapping[url] = 'images/' + name
+                # 同时注册 .jpg ↔ .gif 互换 URL（知乎 GIF 封面用 jpg，实为 gif）
+                path_part = url.split('?')[0]
+                query_part = '?' + url.split('?', 1)[1] if '?' in url else ''
+                alt_url = None
+                if path_part.endswith('.gif'):
+                    alt_url = path_part[:-4] + '.jpg' + query_part
+                elif path_part.endswith('.jpg'):
+                    alt_url = path_part[:-4] + '.gif' + query_part
+                if alt_url:
+                    mapping[alt_url] = 'images/' + name
         except Exception:
             continue
     return mapping
@@ -673,14 +690,19 @@ def convert_html_to_md(element, base_url, uri):
                     if ct: parts.append(f'`{ct}`')
                 elif c.name == 'img':
                     alt = c.get('alt', '')
-                    src = c.get('src', '') or c.get('data-src', '')
-                    if src:
+                    src = c.get('data-original', '') or c.get('data-src', '') or c.get('src', '')
+                    # GIF 封面检测：ztext-gif class 且 path 为 jpg → 换为 gif
+                    cls = c.get('class', [])
+                    if isinstance(cls, str): cls = [cls]
+                    path_part = src.split('?')[0]
+                    if 'ztext-gif' in cls and path_part.endswith('.jpg'):
+                        src = path_part[:-4] + '.gif' + ('?' + src.split('?', 1)[1] if '?' in src else '')
+                    if src and not src.startswith('data:'):
                         if src.startswith('//'):
                             src = f'{uri.scheme}:' + src
                         elif src.startswith('/'):
                             src = base_url + src
-                        if not src.startswith('data:'):
-                            parts.append(f'![{alt}]({src})')
+                        parts.append(f'![{alt}]({src})')
                 elif c.name is None:
                     t = str(c).strip()
                     if t and t not in parts:
@@ -714,7 +736,7 @@ def convert_html_to_md(element, base_url, uri):
             # figure 中处理 img + figcaption
             for img in child.find_all('img'):
                 alt = img.get('alt', '')
-                src = img.get('src', '') or img.get('data-src', '') or img.get('data-original', '')
+                src = img.get('data-original', '') or img.get('data-src', '') or img.get('src', '')
                 if src:
                     if src.startswith('//'):
                         src = f'{uri.scheme}:' + src
@@ -731,6 +753,21 @@ def convert_html_to_md(element, base_url, uri):
             if t: lines.append(f'*{t}*')
         elif tag in ('table',):
             lines.append(child.get_text(strip=True))
+        elif tag == 'img':
+            # 独立 img 标签（不在 p/figure 内的图片）
+            alt = child.get('alt', '')
+            src = child.get('data-original', '') or child.get('data-src', '') or child.get('src', '')
+            cls = child.get('class', [])
+            if isinstance(cls, str): cls = [cls]
+            path_part = src.split('?')[0]
+            if 'ztext-gif' in cls and path_part.endswith('.jpg'):
+                src = path_part[:-4] + '.gif' + ('?' + src.split('?', 1)[1] if '?' in src else '')
+            if src and not src.startswith('data:'):
+                if src.startswith('//'):
+                    src = f'{uri.scheme}:' + src
+                elif src.startswith('/'):
+                    src = base_url + src
+                lines.append(f'![{alt}]({src})')
         elif tag in ('div', 'span'):
             # 容器：递归处理子元素
             sub = convert_html_to_md(child, base_url, uri)
